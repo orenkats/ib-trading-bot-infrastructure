@@ -1,4 +1,4 @@
-Sure! Here is an example `README.md` file for your project:
+
 
 ```markdown
 # IB Trading Bot
