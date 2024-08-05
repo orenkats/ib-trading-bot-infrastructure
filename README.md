@@ -34,7 +34,7 @@ The project consists of several components:
 1. **Clone the repository**:
 
     ```sh
-    git clone https://github.com/yourusername/ib-trading-bot.git
+    git clone https://github.com/orenkats/ib-trading-bot.git
     cd ib-trading-bot
     ```
 
@@ -77,7 +77,7 @@ If you wish to contribute to this project, please fork the repository and submit
 
 ## Contact
 
-For any queries or support, please contact [your-email@example.com].
+For any queries or support, please contact orenkats95@gmail.com
 ```
 
 This `README.md` file provides an overview of the project, its features, and setup instructions. It also includes sections for usage, licensing, contributing, and contact information. Adjust the details as needed to fit your specific project requirements.
