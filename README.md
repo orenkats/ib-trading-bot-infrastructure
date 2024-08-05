@@ -1,5 +1,5 @@
 
-```md
+
 # IB Trading Bot Infrastructure
 
 The IB Trading Bot Infrastructure is designed to facilitate automated trading activities by integrating with the Interactive Brokers API. 
