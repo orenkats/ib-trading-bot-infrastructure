@@ -75,11 +75,11 @@ def create_order(params, whatIf=False):
     if params['type'] == "LMT":
         order.lmtPrice = params['price']
     elif params['type'] == "MKT":
-        order.lmtPrice = 0  # For market orders, the limit price should be set to 0
+        order.lmtPrice = 0  
 
     order.whatIf = whatIf
     order.account = 'U6119229'
-    order.eTradeOnly = ''  # These attributes should be set to an empty string or acceptable value
+    order.eTradeOnly = ''  
     order.firmQuoteOnly = ''
     return order
 
