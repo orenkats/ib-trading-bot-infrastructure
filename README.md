@@ -4,6 +4,15 @@
 
 This project sets up an Interactive Brokers (IB) trading bot infrastructure, running on Amazon Cloud. The bot can perform automated trading based on predefined strategies, send PnL updates to a Telegram chat, and schedule tasks using Amazon's task scheduler.
 
+## About
+
+The IB Trading Bot Infrastructure is designed to facilitate automated trading activities by integrating with the Interactive Brokers API. It includes mechanisms for:
+
+- **Automated Trading**: Execute trades based on alerts and strategies defined in separate scripts.
+- **PnL Updates**: Send periodic Profit and Loss (PnL) updates to a Telegram chat to keep track of trading performance.
+- **Market Scanning**: Use IB's market scanner API to identify trading opportunities based on customizable filters.
+- **Scheduling Tasks**: Leverage Amazon's task scheduler to run trading scripts and manage IB Gateway sessions.
+
 ## Project Structure
 
 - **main_ib.py**: Connects to the IB Gateway, handles order placements, and retrieves PnL data.
