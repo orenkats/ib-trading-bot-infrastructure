@@ -1,83 +1,69 @@
 
+```md
+# IB Trading Bot Infrastructure
 
-```markdown
-# IB Trading Bot
+This project sets up an Interactive Brokers (IB) trading bot infrastructure, running on Amazon Cloud. The bot can perform automated trading based on predefined strategies, send PnL updates to a Telegram chat, and schedule tasks using Amazon's task scheduler.
 
-## Overview
+## Project Structure
 
-This project is an Interactive Brokers (IB) Trading Bot that is deployed on Amazon Cloud. It integrates with IB's API to perform trading actions, fetch market data, and scan for market opportunities. It also includes functionalities to send PnL information to a Telegram bot at regular intervals.
-
-## Features
-
-- **Market Scanner**: Scans for market opportunities based on predefined criteria.
-- **PnL Reporting**: Sends the current PnL information to a Telegram bot every hour.
-- **Automated Trading**: Executes trading strategies (strategy scripts not included in this repository).
-
-## Architecture
-
-The project consists of several components:
-- `main_ib.py`: The main script that initializes the IB API connection and handles real-time data and trading operations.
-- `order_module_ib.py`: Handles order placement and execution logic.
-- `market_scanner.py`: Handles market scanning using IB's market scanner functionality.
-- `telegram_bot_ib.py`: Sends messages to a Telegram bot.
+- **main_ib.py**: Connects to the IB Gateway, handles order placements, and retrieves PnL data.
+- **order_module_ib.py**: Contains the logic for processing trade alerts and placing orders.
+- **telegram_bot_ib.py**: Manages sending messages to a Telegram chat.
+- **scanner.py**: Handles market scanning using the IB API (example script included).
+- **requirements.txt**: Lists the necessary Python packages.
 
 ## Setup and Deployment
 
 ### Prerequisites
 
-- **Python**: Make sure you have Python installed on your machine.
-- **IB Gateway**: Install and configure IB Gateway on your Amazon Cloud instance.
-- **IB Controller**: Install IB Controller to automate the IB Gateway login process.
+- Python 3.7+
+- An Interactive Brokers account
+- An Amazon EC2 instance or other cloud infrastructure
 
 ### Installation
 
-1. **Clone the repository**:
+1. Clone the repository:
 
-    ```sh
-    git clone https://github.com/orenkats/ib-trading-bot.git
-    cd ib-trading-bot
-    ```
+   ```sh
+   git clone https://github.com/orenkats/ib-trading-bot-infrastructure.git
+   cd ib-trading-bot-infrastructure
+   ```
 
-2. **Install the required Python packages**:
+2. Install the required Python packages:
 
-    ```sh
-    pip install -r requirements.txt
-    ```
+   ```sh
+   pip install -r requirements.txt
+   ```
+
+3. Set up your IB Gateway with IBC (Interactive Brokers Controller) to run the gateway automatically.
+
+4. Configure your Amazon EC2 instance to run the `startGateway.bat` file using Task Scheduler.
 
 ### Running the Bot
 
-1. **Start the IB Gateway**: Use IB Controller to start the IB Gateway automatically.
-2. **Set Up Task Scheduler**: Use Amazon Cloud's task scheduler to run the `startGateway.bat` script to ensure the IB Gateway is always running.
+1. Configure your task scheduler to run the `startGateway.bat` script at login or a specific schedule.
+2. Ensure that the IB Gateway is running and connected.
+3. Start the Flask app to handle trade alerts and PnL updates:
 
-### Amazon Cloud
+   ```sh
+   python main_ib.py
+   ```
 
-This project runs on an Amazon Cloud instance. The task scheduler is set to run the trading bot script at regular intervals to ensure it remains active and can handle trading operations without manual intervention.
+### Telegram Integration
 
-### Strategy Integration
+The bot sends updates to a Telegram chat. Ensure you have a Telegram bot set up and replace the `bot_token` and `chat_id` in `telegram_bot_ib.py` with your own values.
 
-The trading strategies are written in a separate script (not included in this repository) and can be integrated with the main script to perform automated trading actions.
+### Scheduling PnL Updates
 
-### Telegram Bot Integration
-
-The project uses the `python-telegram-bot` library to send PnL updates to a specified Telegram bot. The bot token and chat ID need to be configured in the `telegram_bot_ib.py` script.
+The project uses the `python-telegram-bot` library to schedule hourly updates of PnL information to your Telegram chat.
 
 ## Usage
 
-1. **Update Configuration**: Modify the configuration files to include your IB account details, bot token, chat ID, and any other necessary configurations.
-2. **Deploy to Amazon Cloud**: Ensure your Amazon Cloud instance is set up to run the scripts as per the schedule.
-3. **Monitor Telegram**: Receive regular updates on your Telegram bot for PnL and other important notifications.
+- **Automated Trading**: The bot listens for trade alerts and processes them according to the logic defined in `order_module_ib.py`.
+- **PnL Updates**: The bot sends hourly PnL updates to the configured Telegram chat.
+- **Market Scanning**: Use the `scanner.py` to perform market scans based on predefined criteria (example included).
 
 ## License
 
 This project is licensed under the MIT License.
-
-## Contributing
-
-If you wish to contribute to this project, please fork the repository and submit a pull request.
-
-## Contact
-
-For any queries or support, please contact orenkats95@gmail.com
 ```
-
-This `README.md` file provides an overview of the project, its features, and setup instructions. It also includes sections for usage, licensing, contributing, and contact information. Adjust the details as needed to fit your specific project requirements.
