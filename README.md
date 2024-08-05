@@ -2,7 +2,7 @@
 
 # IB Trading Bot Infrastructure
 
-The IB Trading Bot Infrastructure is designed to facilitate automated trading activities by integrating with the Interactive Brokers API. 
+The IB Trading Bot Infrastructure is designed to perform and monitor automated trading activities by integrating with the Interactive Brokers API. 
 It includes mechanisms for:
 
 - **Automated Trading**: Execute trades based on alerts and strategies defined in separate scripts.
@@ -66,7 +66,7 @@ The project uses the `python-telegram-bot` library to schedule hourly updates of
 ## Usage
 
 - **Automated Trading**: The bot listens for trade alerts and processes them according to the logic defined in `order_module_ib.py`.
-- **PnL Updates**: The bot sends hourly PnL updates to the configured Telegram chat.
+- **Profit and Loss Updates**: The bot sends hourly PnL updates to the configured Telegram chat.
 - **Market Scanning**: Use the `scanner.py` to perform market scans based on predefined criteria (example included).
 
 ## License
