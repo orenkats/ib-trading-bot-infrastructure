@@ -1,0 +1,986 @@
+//@version=5
+strategy("Startegy", overlay=true,initial_capital = 10000, commission_type = strategy.commission.cash_per_order, commission_value = 0,pyramiding = 1)
+import TradingView/ta/7
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////
+// VARS { 
+
+riskPercent = input.float(5,"Risk %")
+leverageMultiplier = input.float(10,"Levrage")
+percentOffset = input.float(0.02, title="Percentage Offset for Limit Orders", minval=0.0, step=0.01) / 100
+percentOffsetStop =input.float(0.025, title="Percentage Offset for Stop Orders", minval=0.0, step=0.01) /100
+TPPercent = input.float(4, title="Profit Target (%)", minval=0.1, step=0.1)
+var int orderCounterL = 0
+var int orderCounterS = 0 
+var float stopLossShort = na
+var float stopLossLong = na
+var float nextKeyLevel = na
+var float positionSize = na
+float pt1Long = na
+var float pt2Long = na
+var float pt1Short = na
+var float pt2Short = na
+//var float limitLong = na 
+//var float limitShort = na
+var bool isLong = na
+var bool isAddLong = na
+var bool isAddShort = na
+var bool addLongPending = na
+var bool addShortPending = na
+var bool isShort = na
+var bool longOrderPending = na
+var bool shortOrderPending = na
+var int rrFlagLong = na
+var int rrFlagShort = na
+barsSinceLastEntry() =>
+    strategy.opentrades > 0 ? bar_index - strategy.opentrades.entry_bar_index(strategy.opentrades - 1) : na    
+int entryInd = bar_index - barsSinceLastEntry()
+string lastEntryComment = strategy.opentrades.entry_comment(strategy.opentrades - 1)
+riskAmount = (strategy.equity * (riskPercent / 100))
+tickSize = syminfo.mintick
+if strategy.position_size == 0 and strategy.position_size[1] == 0
+    isShort := false
+    isLong := false
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+//REQUESTS {
+
+oneHourClose = request.security(syminfo.tickerid, '60', close[1], lookahead=barmerge.lookahead_on) 
+oneHourHigh = request.security(syminfo.tickerid, '60', high[1], lookahead=barmerge.lookahead_on)
+oneHourLow = request.security(syminfo.tickerid, '60', low[1], lookahead=barmerge.lookahead_on)
+fourHourClose = request.security(syminfo.tickerid, '240', close[1], lookahead=barmerge.lookahead_on) 
+fourHourHigh = request.security(syminfo.tickerid, '240', high[1], lookahead=barmerge.lookahead_on)
+fourHourLow = request.security(syminfo.tickerid, '240', low[1], lookahead=barmerge.lookahead_on)
+eightHourClose = request.security(syminfo.tickerid, '480', close[1], lookahead=barmerge.lookahead_on) 
+eightHourHigh = request.security(syminfo.tickerid, '480', high[1], lookahead=barmerge.lookahead_on)
+eightHourLow = request.security(syminfo.tickerid, '480', low[1], lookahead=barmerge.lookahead_on)
+dailyOpen = ta.valuewhen(session.isfirstbar,open,0) 
+prevDayClose = request.security(syminfo.tickerid, 'D', close[1], lookahead=barmerge.lookahead_on) 
+prevDay2Open = request.security(syminfo.tickerid, 'D', open[2], lookahead=barmerge.lookahead_on)
+prevDayLow = request.security(syminfo.tickerid, 'D', low[1], lookahead=barmerge.lookahead_on)
+prevDay2Low = request.security(syminfo.tickerid, 'D', low[2], lookahead=barmerge.lookahead_on)  
+prevDayHigh = request.security(syminfo.tickerid, 'D', high[1], lookahead=barmerge.lookahead_on)
+prevDay2High = request.security(syminfo.tickerid, 'D', high[2], lookahead=barmerge.lookahead_on)
+prevWeekLow = request.security(syminfo.tickerid, 'W', low[1], lookahead=barmerge.lookahead_on) 
+prevWeekHigh = request.security(syminfo.tickerid, 'W', high[1], lookahead=barmerge.lookahead_on) 
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////
+//Linreg Curve {
+srcLR = close
+len = input.int(defval=50, minval=1, title="Linear Regression Length")
+lrc = ta.linreg(srcLR, len, 0)
+lrc_prev = ta.linreg(close[1], len, 0)
+colorLine = lrc > lrc_prev ? color.green : color.red
+plot(lrc, color=colorLine, title="Linear Regression Curve", linewidth=1)
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+//VWAP {
+
+hideonDWM = false
+var anchor = "Session"
+src = hlc3
+offset = 0
+
+BANDS_GROUP = "Bands Settings"
+CALC_MODE_TOOLTIP = "Determines the units used to calculate the distance of the bands. When 'Percentage' is selected, a multiplier of 1 means 1%."
+calcModeInput = input.string("Standard Deviation", "Bands Calculation Mode", options = ["Standard Deviation", "Percentage"], group = BANDS_GROUP, tooltip = CALC_MODE_TOOLTIP)
+showBand_1 = true
+bandMult_1 = 1.0
+showBand_2 = false
+bandMult_2 = 2.0
+showBand_3 = false
+bandMult_3 = 3.0
+
+if barstate.islast and ta.cum(volume) == 0
+    runtime.error("No volume is provided by the data vendor.")
+
+new_earnings = request.earnings(syminfo.tickerid, earnings.actual, barmerge.gaps_on, barmerge.lookahead_on, ignore_invalid_symbol=true)
+new_dividends = request.dividends(syminfo.tickerid, dividends.gross, barmerge.gaps_on, barmerge.lookahead_on, ignore_invalid_symbol=true)
+new_split = request.splits(syminfo.tickerid, splits.denominator, barmerge.gaps_on, barmerge.lookahead_on, ignore_invalid_symbol=true)
+
+isNewPeriod = switch anchor
+	"Earnings"  => not na(new_earnings)
+	"Dividends" => not na(new_dividends)
+	"Splits"    => not na(new_split)
+	"Session"   => timeframe.change("D")
+	"Week"      => timeframe.change("W")
+	"Month"     => timeframe.change("M")
+	"Quarter"   => timeframe.change("3M")
+	"Year"      => timeframe.change("12M")
+	"Decade"    => timeframe.change("12M") and year % 10 == 0
+	"Century"   => timeframe.change("12M") and year % 100 == 0
+	=> false
+
+isEsdAnchor = anchor == "Earnings" or anchor == "Dividends" or anchor == "Splits"
+if na(src[1]) and not isEsdAnchor
+	isNewPeriod := true
+
+float vwapValue = na
+float upperBandValue1 = na
+float lowerBandValue1 = na
+float upperBandValue2 = na
+float lowerBandValue2 = na
+float upperBandValue3 = na
+float lowerBandValue3 = na
+
+if not (hideonDWM and timeframe.isdwm)
+    [_vwap, _stdevUpper, _] = ta.vwap(src, isNewPeriod, 1)
+	vwapValue := _vwap
+    stdevAbs = _stdevUpper - _vwap
+	bandBasis = calcModeInput == "Standard Deviation" ? stdevAbs : _vwap * 0.01
+	upperBandValue1 := _vwap + bandBasis * bandMult_1
+	lowerBandValue1 := _vwap - bandBasis * bandMult_1
+	upperBandValue2 := _vwap + bandBasis * bandMult_2
+	lowerBandValue2 := _vwap - bandBasis * bandMult_2
+	upperBandValue3 := _vwap + bandBasis * bandMult_3
+	lowerBandValue3 := _vwap - bandBasis * bandMult_3
+
+plot(vwapValue, title="VWAP", color=#9429ff49, offset=offset)
+////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+//Entry Candels Criteria {
+
+var float gapPer = na
+var int barCounter = na
+var float dailyLow = na
+var float dailyLowestClose = na
+var float dailyHigh = na
+var float dailyhighestClose = na
+    
+if session.isfirstbar
+    barCounter := 0
+    dailyLow := low
+    dailyLowestClose := math.min(close,open)
+    dailyHigh := high
+    dailyhighestClose := math.max(close,open)
+    gapPer := ((open - close[1])/close[1])*100
+    
+else
+    barCounter := barCounter + 1    
+    if low < dailyLow
+        dailyLow := low
+        dailyLowestClose := math.min(close,open)
+    if high > dailyHigh
+        dailyHigh := high
+        dailyhighestClose := math.max(close,open)
+
+tradeTime = barCounter>=0 and barCounter <= 300
+lateTradeTime = barCounter>=0 and barCounter <= 360
+int sessionFirstBarInd = ta.valuewhen(session.isfirstbar,bar_index,0)
+buyCandle = close > open and ((close-open)/(high-open))*100 > 50
+sellCandle = close < open and ((open-close)/(open-low))*100 > 50 
+revCandleShort = close > open ? (high - close) > (close - low) * 1 : (high - open) > (close - low) * 1
+revCandleLong = close < open ? (close - low) > (open - close) * 1 : (open - low) > (high - open) * 1
+
+//plotshape(revCandleShort or sellCandle)
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////
+//FAIR VALUE GAP {
+//Settings
+
+thresholdPer = input.float(0.0, "Threshold %", minval = 0, maxval = 100, step = .1, inline = 'threshold')
+auto = input(false, "Auto", inline = 'threshold')
+showLast = input.int(0, 'Unmitigated Levels', minval = 0)
+mitigationLevels = input.bool(false, 'Mitigation Levels')
+tf = input.timeframe('', "Timeframe")
+
+//Style
+extend = input.int(500, 'Extend', minval = 0, inline = 'extend', group = 'Style')
+dynamic = input(false, 'Dynamic', inline = 'extend', group = 'Style')
+
+bullCss = input.color(#08998134, "Bullish FVG", group = 'Style')
+bearCss = input.color(#f2364625, "Bearish FVG", group = 'Style')
+
+type fvg
+    float max
+    float min
+    bool  isbull
+    int timeCrossed = na
+    int retestCounter = na
+    float vol = na
+    float stop = na
+    int   t = time
+    
+n = bar_index
+
+method tosolid(color id)=> color.rgb(color.r(id),color.g(id),color.b(id))
+
+detect()=>
+    var new_fvg = fvg.new(na, na, na, na, na, na , na, na)
+    threshold = auto ? ta.cum((high - low) / low) / bar_index : thresholdPer / 100
+
+    bull_fvg = low > high[2] and close[1] > high[2] and (low - high[2]) / high[2] > threshold
+    bear_fvg = high < low[2] and close[1] < low[2] and (low[2] - high) / high > threshold
+    
+    if bull_fvg
+        new_fvg := fvg.new(low, high[2], true, bar_index - 1, 0,volume[1], open[1], time)
+    else if bear_fvg
+        new_fvg := fvg.new(low[2], high, false, bar_index - 1, 0,volume[1], open[1], time)
+
+    [bull_fvg, bear_fvg, new_fvg]
+
+    [bull_fvg, bear_fvg, new_fvg]
+
+
+//FVG's detection/display
+var float max_bull_fvg = na, var float min_bull_fvg = na, var bull_count = 0, var bull_mitigated = 0
+var float max_bear_fvg = na, var float min_bear_fvg = na, var bear_count = 0, var bear_mitigated = 0
+var t = 0
+
+var fvg_records = array.new<fvg>(0)
+var fvg_areas = array.new<box>(0)
+
+[bull_fvg, bear_fvg, new_fvg] = detect()
+
+//Bull FVG's
+if bull_fvg and new_fvg.t != t
+    
+    fvg_areas.unshift(box.new(n-2, new_fvg.max, n + 20, new_fvg.min, na, bgcolor = bullCss))
+    fvg_records.unshift(new_fvg)
+    bull_count += 1
+    t := new_fvg.t
+
+//Bear FVG's
+if bear_fvg and new_fvg.t != t
+    
+    fvg_areas.unshift(box.new(n-2, new_fvg.max, n + 20, new_fvg.min, na, bgcolor = bearCss))
+    fvg_records.unshift(new_fvg)
+    bear_count += 1
+    t := new_fvg.t
+
+//Unmitigated/Mitigated lines
+
+//Test for mitigation
+if fvg_records.size() > 0
+    for i = fvg_records.size()-1 to 0
+        get = fvg_records.get(i)
+
+        if get.isbull
+            if close < get.min 
+                //Display line if mitigated
+                if mitigationLevels
+                    line.new(get.t
+                      , get.min
+                      , time
+                      , get.min
+                      , xloc.bar_time
+                      , color = bullCss
+                      , style = line.style_dashed)
+
+                //Delete box
+               
+                area = fvg_areas.remove(i)
+                area.delete()
+                fvg_records.remove(i)
+                bull_mitigated += 1
+
+        else if close > get.max
+            //Display line if mitigated
+            if mitigationLevels
+                line.new(get.t
+                  , get.max
+                  , time
+                  , get.max
+                  , xloc.bar_time
+                  , color = bearCss
+                  , style = line.style_dashed)
+
+            //Delete box
+            area = fvg_areas.remove(i)
+            area.delete()
+            fvg_records.remove(i)
+            bear_mitigated += 1
+
+//Plots
+//Dynamic Bull FVG
+max_bull_plot = plot(max_bull_fvg, color = na)
+min_bull_plot = plot(min_bull_fvg, color = na)
+fill(max_bull_plot, min_bull_plot, color = bullCss)
+
+//Dynamic Bear FVG
+max_bear_plot = plot(max_bear_fvg, color = na)
+min_bear_plot = plot(min_bear_fvg, color = na)
+fill(max_bear_plot, min_bear_plot, color = bearCss)
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////
+//KEY LEVELES {
+
+var float[] keyLevels = array.new_float(10)
+float ppH =  request.security(syminfo.tickerid, '60', hlc3[1], lookahead=barmerge.lookahead_on)
+var float ppH1 = na
+var float ppH2 = na
+var float ppH3 = na
+var float ppH4 = na
+var float ppH5 = na
+var float ppH6 = na
+var int c = 0
+var box dailyHighRange = na
+var box dailyLowRange = na
+var int dailyHighC = na
+var int dailyLowC = na
+var line prevDayLowLine = na 
+var line prevDayHighLine = na 
+var line prevDay2LowLine = na 
+var line prevDay2HighLine = na 
+var line prevWeekLowLine = na 
+var line prevWeekHighLine = na 
+var line openLine = na 
+var line dailyHighestCloseline = na
+var line ppHline = na
+var line pp4Hline = na
+var line ppDailyline = na
+
+if session.isfirstbar
+    
+    fvg_records.clear()
+    keyLevels.set(0,dailyLowestClose)
+    keyLevels.set(1,dailyhighestClose)
+    keyLevels.set(2,ppH)
+    keyLevels.set(3,dailyOpen)
+    keyLevels.set(4,prevDayLow)
+    keyLevels.set(5,prevDayHigh)
+    keyLevels.set(6,pld_1*(1 + percentOffset))
+    keyLevels.set(7,pld_2*(1 + percentOffset))
+    keyLevels.set(8,phd_1*(1 - percentOffset))
+    keyLevels.set(9,phd_2*(1 - percentOffset))
+    keyLevels.unshift(prevWeekLow)
+    keyLevels.unshift(prevWeekHigh)
+    ppDailyline := line.new(bar_index,ppDaily, bar_index + 390 , ppDaily, xloc = xloc.bar_index, style=line.style_solid, color = #3d59f898,width = 2)
+    prevDayLowLine := line.new(bar_index,prevDayLow, bar_index + 390 , prevDayLow, style=line.style_dashed, color = #27b03973,width = 1)
+    prevDayHighLine := line.new(bar_index,prevDayHigh, bar_index + 390 , prevDayHigh, style=line.style_dashed, color = #b0422785,width = 1)
+    prevDay2LowLine := line.new(bar_index,prevDay2Low, bar_index + 390 , prevDay2Low, style=line.style_solid, color = #27b039b6,width = 1)
+    prevDay2HighLine := line.new(bar_index,prevDay2High, bar_index + 390 , prevDay2High, style=line.style_solid, color = #f50c0c85,width = 1)
+    openLine := line.new(bar_index,dailyOpen, bar_index + 390 , dailyOpen, style=line.style_solid,  color = #4e4c4c88,width = 1)
+    prevWeekLowLine := line.new(bar_index,prevWeekLow, bar_index + 390 , prevWeekLow, style=line.style_solid,  color = #49be3188,width = 2)
+    prevWeekHighLine := line.new(bar_index,prevWeekHigh, bar_index + 390 , prevWeekHigh, style=line.style_solid,  color = #d93a3a88,width = 2)
+
+//////////////////////////////////////////////////////////////////////////////////////////////////////// 
+// PLOT KEY LEVEL 
+
+plot(ppDaily, color = ppDaily != ppDaily[1] ? na :  #3d59f898)
+plot(dailyOpen, color = dailyOpen != dailyOpen[1] ? na :  #4e4c4c93)
+plot(prevDayHigh, color = prevDayHigh != prevDayHigh[1] ? na :  #b027279f )
+plot(phd_1, color = ta.change(phd_1) == false ? #ff00008f : na,style =  plot.style_stepline ,linewidth = 2)
+plot(phd_2, color = ta.change(phd_2) == false ? #ff00008f : na,style =  plot.style_stepline ,linewidth = 2)
+plot(prevDayLow, color = prevDayLow != prevDayLow[1] ? na :   #27b03994 )
+plot(pld_1, color = ta.change(pld_1) == false ? #02e9218e : na  ,style =  plot.style_stepline, linewidth = 2)   
+plot(pld_2, color = ta.change(pld_2) == false ?  #02e9218e : na ,style =  plot.style_stepline, linewidth = 2)     
+   
+prevH = ta.valuewhen(dailyHighC == 10,dailyHigh,0)
+prevL = ta.valuewhen(dailyLowC == 10,dailyLow,0)  
+
+if dailyLow == dailyLow[1]
+    dailyLowC += 1  
+       
+if dailyLow < dailyLow[1]
+    
+    dailyLowC := 0 
+    box.delete(dailyLowRange)
+    dailyLowRange := box.new(bar_index, dailyLowestClose,bar_index + 300, dailyLow,border_color =  #36c95b00, bgcolor = #36c95b56) 
+    
+if dailyLowC >= 3 
+    keyLevels.set(0,dailyLowestClose)
+    
+//////////////////////////////////////////////////////////////////////////////////////////////////////// 
+
+if dailyHigh > dailyHigh[1]
+    dailyHighC := 0
+    box.delete(dailyHighRange) 
+    dailyHighRange := box.new(bar_index, dailyHigh,bar_index + 300, dailyhighestClose,border_color =  #df4d4d00 ,bgcolor = color.rgb(223, 77, 77, 65))
+
+if dailyHigh == dailyHigh[1]
+    dailyHighC +=1
+if dailyHighC >= 3          
+    keyLevels.set(1,dailyhighestClose)        
+                           
+////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+if ta.change(ppH) and not session.isfirstbar
+    
+    keyLevels.set(2,ppH)   
+    line.delete(ppHline)
+    ppHline := line.new(bar_index,ppH, bar_index + 60 , ppH, style=line.style_solid,color = #2195f37e, width = 1)
+
+if session.islastbar
+
+    box.set_right(dailyHighRange,bar_index)
+    box.set_right(dailyLowRange,bar_index)
+    
+////////////////////////////////////////////////////////////////////////////////////////////////////////        
+find_nearest_key_level(close_price, keyLevels) =>
+    float nearest_level = na
+    int nearest_level_ind = na
+    float min_distance = na
+    for i = 0 to array.size(keyLevels) - 1
+        key_level = array.get(keyLevels, i)
+        distance = math.abs(close_price - key_level)
+        if close_price > key_level and (na(min_distance) or distance < min_distance)
+            min_distance := distance
+            nearest_level := key_level
+            nearest_level_ind := i
+        if  close_price < key_level and (na(min_distance) or distance < min_distance)
+            min_distance := distance
+            nearest_level := key_level
+            nearest_level_ind := i
+         
+    [nearest_level,nearest_level_ind]
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+find_next_key_level(close_price, keyLevels ,nearest_level , nearest_level_ind) =>
+    float next_level = na
+    float min_distance = na
+    for i = 0 to array.size(keyLevels) - 1 
+        temp_next_level = array.get(keyLevels, i)
+        distance = math.abs(nearest_level - temp_next_level)
+        if close_price > temp_next_level and close_price < nearest_level and temp_next_level < nearest_level and (na(min_distance) or distance < min_distance)
+            min_distance := distance
+            next_level := temp_next_level
+        if close_price < temp_next_level and close_price > nearest_level and temp_next_level > nearest_level and  (na(min_distance) or distance < min_distance)
+            min_distance := distance
+            next_level := temp_next_level        
+    //line.new(bar_index,nearest_level,bar_index+1,nearest_level,color = #121614,width = 2)
+    //line.new(bar_index,next_level,bar_index+1,next_level,color = #dd0bcc,width = 3)        
+    next_level
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////
+find_nearest_fvg(close_price, fvg_records) =>
+    bull_fvgs = array.new<fvg>(0)
+    bear_fvgs = array.new<fvg>(0)
+    if array.size(fvg_records) > 0
+        for i = array.size(fvg_records) - 1 to 0 
+            if fvg_records.get(i).isbull
+                bull_fvgs.unshift(fvg_records.get(i)) // the last recent fvg at the begining 
+            else
+                bear_fvgs.unshift(fvg_records.get(i)) // the last recent fvg at the begining  
+    float nearest_bull_level = bull_fvgs.size() >= 1 ? bull_fvgs.get(0).min : low[1]
+    float nearest_bear_level = bear_fvgs.size() >= 1 ? bear_fvgs.get(0).max : high[1]
+    float min_bull_distance = na
+    float min_bear_distance = na
+    float key_level_bull_min = na
+    float nearest_bull_level_2 = na
+    float key_level_bull_max = na
+    float key_level_bear_min = na
+    float nearest_bear_level_2 = na
+    float key_level_bear_max = na
+    float limit_long = bull_fvgs.size() == 1 ? math.avg(bull_fvgs.get(0).min,bull_fvgs.get(0).max) : na
+    float limit_short = bear_fvgs.size() == 1 ? math.avg(bear_fvgs.get(0).min,bear_fvgs.get(0).max) : na
+    float key_avg_long = na 
+    float key_avg_short = na
+    float distance_bull = na
+    float distance_bear = na
+    float percent_Off_set = 0.001
+    if array.size(bull_fvgs) > 0
+        for i = 0 to bull_fvgs.size() - 1
+           
+            if i < bull_fvgs.size() - 1   
+                key_level_bull_min := bull_fvgs.get(i).min
+                key_level_bull_max := bull_fvgs.get(i).max
+                distance_bull := math.abs(close_price - key_level_bull_min) 
+
+                if (na(min_bull_distance) or distance_bull < min_bull_distance) 
+                    if key_level_bull_min <= bull_fvgs.get(i + 1).max*(1 + percent_Off_set) and bull_fvgs.get(i).retestCounter < 3
+                        key_level_bull_min := bull_fvgs.get(i + 1).min
+                        nearest_bull_level := key_level_bull_min
+                        nearest_bull_level_2 :=  bull_fvgs.get(i+1).max
+                        limit_long := bull_fvgs.get(0).max
+                        if bull_fvgs.size() > 2
+                            if i < bull_fvgs.size() - 2 
+                                if key_level_bull_min <= bull_fvgs.get(i + 2).max*(1 + percent_Off_set) 
+                                    key_level_bull_min := bull_fvgs.get(i + 2).min
+                                    nearest_bull_level := key_level_bull_min
+                                    nearest_bull_level_2 :=  bull_fvgs.get(i+2).max        
+                                    limit_long := math.avg( bull_fvgs.get(1).min,bull_fvgs.get(1).max)*(1 + 0.0001)
+                        //line.new(bar_index, nearest_bull_level,bar_index+1, nearest_bull_level,color = color.black,width = 2)   
+                        //line.new(bar_index, limit_long,bar_index+1, limit_long,color = #00f7ff,width = 2)
+                        distance_bull := math.abs(close_price - key_level_bull_min) 
+                        min_bull_distance := distance_bull
+                    else    
+                        min_bull_distance := distance_bull
+                        //line.new(bar_index, limit_long,bar_index+2, limit_long,color = color.rgb(208, 255, 0),width = 2)  
+                        nearest_bull_level := key_level_bull_min
+                        nearest_bull_level_2 := key_level_bull_max
+                        limit_long := nearest_bull_level_2//math.avg( nearest_bull_level,nearest_bull_level_2)*(1 + 0.0001)
+                        //line.new(bar_index, nearest_bull_level,bar_index+1, nearest_bull_level,color = #00ffff,width = 2)
+                                     
+    if array.size(bear_fvgs) > 0 
+        for i = 0 to bear_fvgs.size() - 1       
+            
+            if i < bear_fvgs.size() - 1
+                key_level_bear_min := bear_fvgs.get(i).min
+                key_level_bear_max := bear_fvgs.get(i).max
+                distance_bear := math.abs(close_price - key_level_bear_max)   
+
+                if (na(min_bear_distance) or distance_bear < min_bear_distance ) 
+                    if key_level_bear_max >= bear_fvgs.get(i + 1).min*(1 - percent_Off_set) and bear_fvgs.get(i).retestCounter < 3
+                        key_level_bear_max := bear_fvgs.get(i + 1).max
+                        nearest_bear_level := key_level_bear_max
+                        nearest_bear_level_2 := bear_fvgs.get(i + 1).min
+                        limit_short :=  bear_fvgs.get(0).min
+                        if bear_fvgs.size() > 2
+                            if i < bear_fvgs.size() - 2 
+                                if key_level_bear_max >= bear_fvgs.get(i + 2).min*(1 - percent_Off_set)
+                                    key_level_bear_max := bear_fvgs.get(i + 2).max
+                                    nearest_bear_level := key_level_bear_max
+                                    nearest_bear_level_2 := bear_fvgs.get(i + 2).min        
+                                    limit_short :=  math.avg(bear_fvgs.get(1).min,bear_fvgs.get(1).max)*(1 - 0.0001)
+
+                        distance_bear := math.abs(close_price - key_level_bear_max)
+                        min_bear_distance := distance_bear
+                    else
+                        min_bear_distance := distance_bear
+                        
+                        nearest_bear_level := key_level_bear_max
+                        nearest_bear_level_2 := key_level_bear_min
+                        limit_short := nearest_bear_level_2//math.avg(nearest_bear_level,nearest_bear_level_2)*(1 - 0.0001)
+          
+    //line.new(bar_index, limit_short,bar_index+1, limit_short,color = color.blue,width = 2)                     
+    [nearest_bull_level, nearest_bear_level, limit_long, limit_short]
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+detect_fvg_retest(fvg_records) =>
+    int retest = 0 
+    int counter = 0
+    var fvg temp_fvg_bull = na
+    var fvg temp_fvg_bear = na
+    
+    if fvg_records.size() > 0
+        for i = 0 to fvg_records.size() - 1
+            key_level_min = fvg_records.get(i).min
+            key_level_max = fvg_records.get(i).max
+            key_avg = math.avg(key_level_max,key_level_min)
+            //line.new(bar_index, key_avg,bar_index+1, key_avg,color = color.orange,width = 2)
+            breakOutInd = fvg_records.get(i).timeCrossed
+            if fvg_records.get(i).isbull 
+                if  ((low <= key_level_max and close > key_level_min and (buyCandle or revCandleLong) )) and bar_index > breakOutInd + 1
+                    temp_fvg_bull := fvg_records.get(i) 
+                    temp_fvg_bull.retestCounter += 1 
+                    fvg_records.set(i,temp_fvg_bull)
+                    box.set_text(fvg_areas.get(i),str.tostring(fvg_records.get(i).retestCounter))
+                    if fvg_records.get(i).retestCounter >= 3
+                        counter := fvg_records.get(i).retestCounter
+                    //label.new(bar_index,high,yloc = yloc.belowbar,text = str.tostring(fvg_records.get(i).retestCounter), color = color.green, style = label.style_label_up)
+                    if fvg_records.get(i).retestCounter >= 2  
+                        retest := 1
+                         
+            if not fvg_records.get(i).isbull   
+                if  ((high >= key_level_min and close < key_level_max and (sellCandle or revCandleShort) )) and bar_index > breakOutInd + 1
+                    temp_fvg_bear := fvg_records.get(i) 
+                    temp_fvg_bear.retestCounter += 1 
+                    fvg_records.set(i,temp_fvg_bear)
+                    box.set_text(fvg_areas.get(i),str.tostring(fvg_records.get(i).retestCounter))
+                    if fvg_records.get(i).retestCounter >= 3
+                        //if bar_index - fvg_records.get(i).timeCrossed == 60 
+                            //temp_fvg_bear.retestCounter := 0 
+                            //fvg_records.set(i,temp_fvg_bear)
+                        counter := fvg_records.get(i).retestCounter
+
+                    //label.new(bar_index,high,yloc = yloc.abovebar,text = str.tostring(fvg_records.get(i).retestCounter), color = color.red) 
+                    if fvg_records.get(i).retestCounter >= 2  
+                        retest := 2                                                                         
+    [retest,counter]
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+detect_pivot_retest(nearest_level) =>
+    int retest = 0
+    float percent_Off_set = 0.0001
+    
+    if  (low[1] <= nearest_level and close[1] > nearest_level ) or (open[1] > nearest_level and low <= nearest_level and close > nearest_level) 
+        retest := 1
+        //label.new(bar_index,high,yloc = yloc.belowbar,text = str.tostring(retest), color = color.green, style = label.style_label_up) 
+        
+    if  (high[1] >= nearest_level*(1 - percent_Off_set) and  close[1] < nearest_level) or (open[1] < nearest_level and high >= nearest_level and close < nearest_level) 
+        retest := 2
+        
+    retest
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////
+find_profit_targets(keyLevels,nearest_level_ind) =>
+    
+    pt_arr_l = array.new<float>(0)
+    pt_arr_s = array.new<float>(0)
+    
+    for i = 0 to keyLevels.size() - 1
+        if keyLevels.get(i) > keyLevels.get(nearest_level_ind)
+            pt_arr_l.unshift(keyLevels.get(i))
+            
+        if keyLevels.get(i) < keyLevels.get(nearest_level_ind)
+            pt_arr_s.unshift(keyLevels.get(i))    
+    
+    pt_arr_l.sort()
+    pt_arr_s.sort()
+    pt_arr_s.reverse()
+    
+    //label.new(bar_index,high,yloc = yloc.belowbar,text = str.tostring(keyLevels.size()), color = color.red) 
+    
+    //pt_arr_s.reverse()
+    [pt_arr_l,pt_arr_s]
+////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+calc_risk_reward(limit, stoploss, nearest_level,next_level, entrySignalLong, entrySignalshort) =>
+    var bool RRok = false
+    int temp = 0
+    //line.new(bar_index,nearest_level,bar_index+1,nearest_level,color = color.rgb(243, 5, 243),width = 2)
+    //line.new(bar_index,next_level,bar_index+1,next_level,color = color.rgb(243, 180, 5),width = 2)
+    
+    if math.abs(stoploss - limit) * 1.4 < math.abs(limit - next_level) and close > nearest_level and entrySignalLong //and (buyCandle or revCandleLong)
+        temp := 1
+       
+    if math.abs(stoploss - limit) * 1.4 < math.abs(limit - next_level) and close < nearest_level and entrySignalshort //and (sellCandle or revCandleShort)
+        temp := 2
+
+    temp
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+[nearestKeyLevel, nearestKeyLevelInd] = find_nearest_key_level(close,keyLevels)
+nextKeyLevel := find_next_key_level(close, keyLevels , nearestKeyLevel, nearestKeyLevelInd)
+[fvgRetest ,rCounter] = detect_fvg_retest(fvg_records)
+pivotRetest = detect_pivot_retest(nearestKeyLevel)
+entrySignalLong = (ta.barssince(pivotRetest == 1) <= 5 and ta.barssince(fvgRetest == 1)<=2) or (fvgRetest == 1 and rCounter >= 3 )
+entrySignalShort = (ta.barssince(pivotRetest == 2) <= 5 and ta.barssince(fvgRetest == 2)<=2) or (fvgRetest == 2 and rCounter >= 3 )
+
+// FIND STOPLOSS {
+
+[nearestBull, nearestBear, limitLong, limitShort] = find_nearest_fvg(close,fvg_records)        
+stopLossShort := math.max(high[1]*(1 + percentOffsetStop), nearestBear*(1 + percentOffsetStop),nearestKeyLevel*(1 + percentOffsetStop)) 
+stopLossLong :=  math.min(low[1]*(1 - percentOffsetStop), nearestBull*(1 - percentOffsetStop),nearestKeyLevel*(1 - percentOffsetStop)) 
+
+lastEntryStopShort = ta.valuewhen(bar_index == entryInd,stopLossShort,0)
+lastEntryLimitShort = ta.valuewhen(bar_index == entryInd,limitShort,0)
+lastEntryStopLong = ta.valuewhen(bar_index == entryInd,stopLossLong,0)
+lastEntryLimitLong = ta.valuewhen(bar_index == entryInd,limitLong,0)
+
+rrFlagLong := calc_risk_reward(limitLong, stopLossLong, nearestKeyLevel, nextKeyLevel, entrySignalLong, entrySignalShort)
+rrFlagShort := calc_risk_reward(limitShort, stopLossShort, nearestKeyLevel, nextKeyLevel, entrySignalLong, entrySignalShort)
+//plotshape(rrFlagShort == 2)
+
+//}
+
+//OPEN LONG POSITION {
+
+if rrFlagLong == 1 and strategy.position_size <= 0 and tradeTime and timeframe.isintraday and dailyLowC >= 3 and dailyHighC >= 5 //and lrc >= lrc_prev
+    
+    orderCounterL += 1   
+    [ptLong,ptShort] = find_profit_targets(keyLevels,nearestKeyLevelInd)
+    rrLong = limitLong + math.abs(stopLossLong - limitLong) * 3
+
+    if ptLong.size() == 0
+        
+        pt1Long := rrLong 
+    if ptLong.size() > 0
+         
+        pt1Long := rrLong > close ? math.min(ptLong.get(0)*(1 - 0.0001),rrLong ) : math.min(ptLong.get(0)*(1 - 0.0001), close + math.abs(stopLossLong - close) * 3) 
+        //label.new(bar_index,high,yloc = yloc.belowbar,text = str.tostring(pt1Long), color = color.red)
+    if ptLong.size() == 1 and ptLong.get(0) > math.abs(stopLossLong - limitLong)*10  
+        //label.new(bar_index,high,yloc = yloc.belowbar,text = str.tostring(pt1Long), color = color.red)
+        rrLong := limitLong + math.abs(stopLossLong - limitLong) * 1.9
+        pt1Long := math.min(ptLong.get(0)*(1 - 0.0001),rrLong )
+        
+
+    maxAllowedSize = strategy.equity * leverageMultiplier / close
+    positionSize := int(math.round(math.min(riskAmount / math.abs(close - stopLossLong), maxAllowedSize)))
+    
+    if not isShort
+       
+        strategy.cancel("TP Long 1")
+        strategy.cancel("TP Long 2")
+        strategy.cancel("Add Long")
+        strategy.cancel("TP Add Long 1")
+        strategy.cancel("TP Add Long 2")
+        strategy.cancel("Open Long")
+        strategy.entry("Open Long", strategy.long,limit = limitLong, qty = positionSize)
+        
+    if isShort
+        strategy.cancel("TP Short 1")
+        strategy.cancel("TP Short 2")
+        strategy.cancel("TP Add Short 1")
+        strategy.cancel("TP Add Short 2")
+        strategy.cancel("TP Add Long 1")
+        strategy.cancel("TP Add Long 2")
+        strategy.cancel("Add Short")
+        strategy.cancel("Add Long")
+        strategy.cancel("Open Long")
+        strategy.entry("Open Long", strategy.long, qty = positionSize)
+
+    isShort := false    
+    longOrderPending := true
+    isAddShort := false
+    
+    if ptLong.size() > 1
+        
+        //pt1Long := math.min()
+        strategy.cancel("TP Long 1")
+        strategy.exit("TP Long 1", "Open Long", limit = pt1Long,stop = stopLossLong ,qty = positionSize/2 ,comment_loss="S/L", comment_profit="T/P 1")
+        //line.new(bar_index,pt1Long,bar_index+1,pt1Long,color = color.blue,width = 2)
+        pt2Long := ptLong.get(1)*(1 - 0.0001)
+        
+        strategy.cancel("TP Long 2")
+        strategy.exit("TP Long 2", "Open Long", limit = pt2Long, stop = stopLossLong, qty = math.floor(positionSize/2) + 1 ,comment_loss="S/L", comment_profit="T/P 2") 
+    else
+        //label.new(bar_index,high,yloc = yloc.belowbar,text = str.tostring(pt1Long), color = color.red)
+        //label.new(bar_index,high,yloc = yloc.belowbar,text = str.tostring(pt2Long), color = color.red)
+        pt2Long := math.min(ptLong.get(0)*(1 - 0.0001),rrLong )
+         
+        strategy.cancel("TP Long 1")
+        strategy.exit("TP Long 1", "Open Long", limit = pt2Long,stop = stopLossLong, qty = positionSize ,comment_loss="S/L", comment_profit="T/P 1")
+       
+    line.new(bar_index,stopLossLong,bar_index+3,stopLossLong,color = color.rgb(24, 206, 121),width = 2)
+    line.new(bar_index,limitLong,bar_index+3,limitLong,style = line.style_dashed,color =color.green,width = 1)
+    
+if strategy.position_size[1] > 0 and strategy.position_size == 0 and low <= lastEntryStopLong and close > lastEntryStopLong*(1 - 0.0001) and dailyLowC >= 3 
+    stopLossLong := low*(1 - 0.0002)
+    maxAllowedSize = strategy.equity * leverageMultiplier / close
+    positionSize := int(math.round(math.min(riskAmount / math.abs(close - stopLossLong), maxAllowedSize)))
+    //line.new(bar_index,stopLossLong,bar_index+1,stopLossLong,color = color.blue) 
+    rrLong = close  + math.abs(stopLossLong  - close  ) * 2
+    rrLong2 = close  + math.abs(stopLossLong  - close  ) * 3
+    pt1Long := math.min(pt1Long ,rrLong)
+    pt2Long := math.min(pt1Long ,rrLong2)
+    strategy.cancel("Add Long")
+    strategy.cancel("TP Add Long 1")
+    strategy.cancel("TP Add Long 2")
+    strategy.entry("Open Long", strategy.long, qty = positionSize)
+    strategy.exit("TP Long 1", "Open Long", limit = pt1Long,stop = stopLossLong ,qty = positionSize/2 ,comment_loss="S/L", comment_profit="T/P 1")
+    strategy.exit("TP Long 2", "Open Long", limit = pt2Long, stop = stopLossLong, qty = math.floor(positionSize/2) + 1 ,comment_loss="S/L", comment_profit="T/P 2") 
+    isLong := true
+    
+/////////////////////// ADD LONG POSITION ///////////////////////////////
+
+if strategy.position_size > 0 and stopLossLong < lastEntryStopLong*(1 - percentOffsetStop) and strategy.opentrades[1] == 1 and stopLossLong == stopLossLong[1] and lastEntryComment != "Add Long"
+
+    rrLong = lastEntryLimitLong  + math.abs(lastEntryStopLong  - lastEntryLimitLong  ) * 2
+    rrLong2 = lastEntryLimitLong  + math.abs(lastEntryStopLong  - lastEntryLimitLong  ) * 3
+    pt1Long := close < ppH ? math.min(pt1Long,ppH) : pt1Long
+    //newAvg = math.avg(lastEntryLimitLong,lastEntryStopLong)
+    //newrrLong = newAvg + math.abs(stopLossLong  - newAvg  ) * 
+    //pt1Long := newrrLong
+    strategy.cancel("TP Long 1")
+    strategy.exit("TP Long 1", "Open Long", limit = pt1Long,stop = stopLossLong ,qty = positionSize/2 ,comment_loss="S/L", comment_profit="T/P 1")
+    strategy.cancel("TP Long 2")
+    strategy.exit("TP Long 2", "Open Long", limit = pt2Long,stop = stopLossLong  ,qty = math.floor(positionSize/2) + 1 ,comment_loss="S/L 2", comment_profit="T/P 2")
+    maxAllowedSize = strategy.equity * leverageMultiplier / close
+    positionSize := int(math.round(math.min(riskAmount / math.abs(close - stopLossLong), maxAllowedSize)))
+    addLongPending := true
+    strategy.cancel("Add Long ")
+    strategy.entry("Add Long", strategy.long,limit = lastEntryStopLong, qty = positionSize)
+    strategy.cancel("TP Add Long 1")
+    strategy.exit("TP Add Long 1", "Add Long", limit = pt1Long,stop = stopLossLong  ,qty = positionSize/2 ,comment_loss="S/L Add 1", comment_profit="T/P Add 1")
+    strategy.cancel("TP Add Long 2")
+    strategy.exit("TP Add Long 2", "Add Long", limit = pt2Long,stop = stopLossLong  ,qty = math.floor(positionSize/2) + 1 ,comment_loss="S/L Add 2", comment_profit="T/P Add 2")
+
+if addLongPending[1] and strategy.position_size > 0 and lastEntryComment == "Add Long"
+    isAddLong := true
+    addLongPending := false
+
+if strategy.position_size > 0 and ta.change(ppH) and close < ppH 
+
+    if strategy.position_size < positionSize
+        
+        strategy.cancel("TP Long 2")
+        strategy.exit("TP Long 2", "Open Long", limit = ppH , stop = stopLossLong, qty = math.floor(positionSize/2) + 1 ,comment_loss="S/L", comment_profit="T/P 2") 
+    else
+        
+        strategy.cancel("TP Long 1")
+        strategy.exit("TP Long 1", "Open Long", limit = ppH,stop = stopLossLong ,qty = positionSize/2 ,comment_loss="S/L", comment_profit="T/P 1") 
+        strategy.cancel("TP Long 2")
+        strategy.exit("TP Long 2", "Open Long", limit = pt2Long, stop = stopLossLong, qty = math.floor(positionSize/2) + 1 ,comment_loss="S/L", comment_profit="T/P 2") 
+    
+if strategy.position_size > 0
+    line.new(bar_index,pt1Long,bar_index+5,pt1Long,color = color.rgb(5, 215, 243),width = 2)
+    line.new(bar_index,pt2Long,bar_index+5,pt2Long,color = color.rgb(5, 215, 243),width = 2)
+    longOrderPending := false
+    isLong := true
+
+if strategy.position_size > 0 and nearestBull > nearestBull[1] and barsSinceLastEntry()  >= 60
+    
+    if strategy.position_size < positionSize
+        strategy.cancel("TP Long 2")
+        strategy.exit("TP Long 2", "Open Long", limit = pt2Long, stop = stopLossLong, qty = math.floor(positionSize/2) + 1 ,comment_loss="S/L", comment_profit="T/P 2") 
+    else
+        
+        strategy.cancel("TP Long 1")
+        strategy.exit("TP Long 1", "Open Long", limit = pt1Long,stop = stopLossLong ,qty = positionSize/2 ,comment_loss="S/L", comment_profit="T/P 1") 
+        strategy.cancel("TP Long 2")
+        strategy.exit("TP Long 2", "Open Long", limit = pt2Long, stop = stopLossLong, qty = math.floor(positionSize/2) + 1 ,comment_loss="S/L", comment_profit="T/P 2") 
+    
+//////////////////////////////////////////////////////////////////////////////////////////////////////// 
+
+// OPEN SHORT POSITION {
+
+if (rrFlagShort == 2 ) and strategy.position_size >= 0  and tradeTime and timeframe.isintraday and dailyLowC >= 3 //and lrc <= lrc_prev
+   
+    orderCounterS += 1 
+    rrShort = limitShort - math.abs(stopLossShort - limitShort) * 2
+    [ptLong,ptShort] = find_profit_targets(keyLevels,nearestKeyLevelInd) 
+    //label.new(bar_index,high,yloc = yloc.belowbar,text = str.tostring(ptShort.size()), color = color.red) 
+    if ptShort.size() == 0
+        pt1Short := rrShort
+    if ptShort.size() > 0
+        pt1Short := close < rrShort ? math.max(ptShort.get(0)*(1 + 0.0001),rrShort) : math.max(ptShort.get(0)*(1 + 0.0001), close - math.abs(stopLossShort - close)*2) 
+    maxAllowedSize = strategy.equity * leverageMultiplier / close
+    positionSize := int(math.round(math.min(riskAmount / math.abs(close - stopLossShort), maxAllowedSize)))
+    
+    if not isLong
+        
+        strategy.cancel("Add Short")
+        strategy.cancel("TP Add Long 1")
+        strategy.cancel("TP Add Long 2")
+        strategy.cancel("TP Add Short 1")
+        strategy.cancel("TP Add Short 2")
+        strategy.cancel("Open Short")
+        strategy.entry("Open Short", strategy.short,limit = limitShort, qty = positionSize)
+    
+    if isLong
+        strategy.cancel("TP Short 1")
+        strategy.cancel("TP Short 2")
+        strategy.cancel("TP Long 1")
+        strategy.cancel("TP Long 2")
+        strategy.cancel("TP Add Long 1")
+        strategy.cancel("TP Add Long 2")
+        strategy.cancel("Add Long")
+        strategy.cancel("Add Short")
+        strategy.cancel("Open Short")
+        if math.abs(close - rrShort)/100 <= 1.0002
+            pt1Short := close - math.abs(stopLossShort - close)*2
+        strategy.entry("Open Short", strategy.short, qty = positionSize)
+
+    isLong := false
+    isAddLong := false    
+    shortOrderPending := true 
+
+    if ptShort.size() > 1
+        
+        strategy.cancel("TP Short 1")
+        strategy.exit("TP Short 1", "Open Short", limit = pt1Short,stop = stopLossShort ,qty = positionSize/2 ,comment_loss="S/L", comment_profit="T/P 1")
+        pt2Short := ptShort.get(1)*(1 + 0.0001)
+        strategy.cancel("TP Short 2")
+        strategy.exit("TP Short 2", "Open Short", limit = pt2Short, stop = stopLossShort ,qty = math.floor(positionSize/2) + 1 ,comment_loss="S/L", comment_profit="T/P 2")
+    else 
+        pt2Short :=  math.max(ptShort.get(0)*(1 + 0.0001),rrShort)  
+        strategy.cancel("TP Short 1")
+        strategy.exit("TP Short 1", "Open Short", limit = pt1Short ,stop = stopLossShort ,qty = positionSize ,comment_loss="S/L", comment_profit="T/P 1")
+
+    line.new(bar_index,stopLossShort,bar_index+3,stopLossShort,color =color.red,width = 2)
+    line.new(bar_index,limitShort,bar_index+3,limitShort,style = line.style_dashed,color =color.red,width = 1)
+    line.new(bar_index,pt1Short,bar_index+5,pt1Short,color = #af1fa3,width = 2)
+    line.new(bar_index,pt2Short,bar_index+5,pt2Short,color =  #af1fa3,width = 2)
+
+if strategy.position_size < 0
+    //line.new(bar_index,stopLossShort,bar_index+1,stopLossShort,color =color.red,width = 2)
+    shortOrderPending := false
+    isShort := true
+
+   
+if strategy.position_size[1] < 0 and strategy.position_size == 0 and high >= lastEntryStopShort and close < lastEntryStopShort and ta.barssince(bullStructure) > 3
+    //label.new(bar_index,high,yloc = yloc.belowbar,text = str.tostring(strategy.position_size), color = color.red) 
+    stopLossShort := high*(1 + percentOffsetStop)
+    line.new(bar_index,stopLossShort,bar_index+5,stopLossShort,color =color.red,width = 2)
+    rrShort = close  - math.abs(stopLossShort  - close  ) * 2
+    rrShort2 = close  - math.abs(stopLossShort  - close  ) * 3
+    pt1Short := math.max(pt1Short ,rrShort)
+    pt2Short := math.max(pt2Short ,rrShort2)
+    maxAllowedSize = strategy.equity * leverageMultiplier / close
+    positionSize := int(math.round(math.min(riskAmount / math.abs(close - stopLossShort), maxAllowedSize)))
+    strategy.entry("Open Short", strategy.short, qty = positionSize) 
+    strategy.exit("TP Short 1", "Open Short", limit = pt1Short,stop = stopLossShort ,qty = positionSize/2 ,comment_loss="S/L", comment_profit="T/P 1")      
+    strategy.exit("TP Short 2", "Open Short", limit = pt2Short,stop = stopLossShort ,qty = math.floor(positionSize/2) + 1 ,comment_loss="S/L 2", comment_profit="T/P 2")
+    isShort := true
+
+if strategy.position_size < 0 and strategy.position_size > strategy.position_size[1]
+    
+    pt2Short := math.max(pt2Short[1], lastEntryLimitShort  - math.abs(lastEntryStopShort - lastEntryLimitShort ) * 3)
+    strategy.cancel("TP Short 2")
+    strategy.exit("TP Short 2", "Open Short", limit = pt2Short,stop = stopLossShort ,qty = math.floor(positionSize/2) + 1 ,comment_loss="S/L 2", comment_profit="T/P 2")
+  
+/////////////////////// ADD SHORT POSITION ///////////////////////////////
+if strategy.position_size < 0 and stopLossShort > lastEntryStopShort*(1 + percentOffsetStop) and strategy.opentrades[1] == 1 and stopLossShort == stopLossShort[1] //and lastEntryComment != "Add Short"
+
+    strategy.cancel("TP Short 1")
+    strategy.exit("TP Short 1", "Open Short", limit = pt1Short,stop = stopLossShort ,qty = positionSize/2 ,comment_loss="S/L", comment_profit="T/P 1")
+    strategy.cancel("TP Short 2")
+    strategy.exit("TP Short 2", "Open Short", limit = pt2Short,stop = stopLossShort ,qty = math.floor(positionSize/2) + 1 ,comment_loss="S/L 2", comment_profit="T/P 2")
+    maxAllowedSize = strategy.equity * leverageMultiplier / close
+    positionSize := int(math.round(math.min(riskAmount / math.abs(close - stopLossShort), maxAllowedSize)))
+    strategy.entry("Add Short", strategy.short,limit = lastEntryStopShort, qty = positionSize)
+    strategy.exit("TP Add Short 1", "Add Short", limit = pt1Short,stop = stopLossShort ,qty = positionSize/2 ,comment_loss="S/L Add 1", comment_profit="T/P Add 1")
+    strategy.exit("TP Add Short 2", "Add Short", limit = pt2Short,stop = stopLossShort ,qty = math.floor(positionSize/2) + 1 ,comment_loss="S/L Add 2", comment_profit="T/P Add 2")
+
+if addShortPending[1] and strategy.position_size < 0 and lastEntryComment == "Add Short"
+    isAddShort := true
+    addShortPending := false
+
+if strategy.position_size < 0 and ta.change(ppH) and close > ppH
+    //line.new(bar_index,stopLossShort,bar_index+1,stopLossShort,color =color.red,width = 2)
+    //stopLossShort := stopLossShort*(1 + percentOffsetStop)
+    
+    if strategy.position_size > -positionSize
+        strategy.cancel("TP Short 2")
+        strategy.exit("TP Short 2", "Open Short", limit = pt2Short,stop = stopLossShort ,qty = math.floor(positionSize/2) + 1 ,comment_loss="S/L 2", comment_profit="T/P 2")
+        //label.new(bar_index,high,yloc = yloc.belowbar,text = str.tostring(positionSize), color = color.red) 
+    else
+        strategy.cancel("TP Short 1")
+        strategy.exit("TP Short 1", "Open Short", limit = ppH, stop = stopLossShort ,qty = positionSize/2 ,comment_loss="S/L", comment_profit="T/P 1") 
+        strategy.cancel("TP Short 2")  
+        strategy.exit("TP Short 2", "Open Short", limit = pt2Short, stop = stopLossShort ,qty = math.floor(positionSize/2) + 1 ,comment_loss="S/L", comment_profit="T/P 2") 
+
+if strategy.position_size < 0 and nearestBear < nearestBear[1] and barsSinceLastEntry()  >= 60
+  
+    if strategy.position_size > -positionSize
+        strategy.cancel("TP Short 2")
+        strategy.exit("TP Short 2", "Open Short", limit = pt2Short,stop = stopLossShort ,qty = math.floor(positionSize/2) + 1 ,comment_loss="S/L 2", comment_profit="T/P 2")
+        //label.new(bar_index,high,yloc = yloc.belowbar,text = str.tostring(positionSize), color = color.red) 
+    else
+       
+        strategy.cancel("TP Short 1")
+        strategy.exit("TP Short 1", "Open Short", limit = pt1Short, stop = stopLossShort ,qty = positionSize/2 ,comment_loss="S/L", comment_profit="T/P 1") 
+        strategy.cancel("TP Short 2")  
+        strategy.exit("TP Short 2", "Open Short", limit = pt2Short, stop = stopLossShort ,qty = math.floor(positionSize/2) + 1 ,comment_loss="S/L", comment_profit="T/P 2") 
+    
+if ta.barssince(shortOrderPending and not shortOrderPending[1]) > 10 and  bullStructure
+    strategy.cancel("Open Short")  
+if ta.barssince(longOrderPending  and not longOrderPending[1]) > 10 and  bearStructure  
+    strategy.cancel("Open Long") 
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////
+if session.islastbar
+    isLong := false
+    isAddLong := false
+    isShort := false
+    longOrderPending := false
+    shortOrderPending := false
+    strategy.cancel_all()  
+    strategy.close_all("End Day")
+    
+////////////////////////////////////////////////////////////////////////////////////////////////////////
+//JSON PARAMETERS{
+
+var string entryMSGLong = na
+var string entryMSGShort = na
+var string closePositionMSGLong = na
+var string closePositionMSGShort = na
+
+entryMSGLong := "{ \"symbol\": \"TQQQ\",  \"side\": \"BUY\", \"price\": "+ str.tostring(math.round(close,2)) +" , \"quantity\": " + str.tostring(math.abs(positionSize)) + ", \"type\": \"MKT\" , \"action\": \"Open Long\" }"
+closePositionMSGLong := "{ \"symbol\": \"TQQQ\",  \"side\": \"SELL\", \"price\": "+ str.tostring(math.round(close,2)) +" , \"quantity\": " + str.tostring(math.abs(positionSize)) + ", \"type\": \"MKT\" , \"action\": \"Close Position\" }"
+entryMSGShort := "{ \"symbol\": \"TQQQ\",  \"side\": \"SELL\", \"price\": "+ str.tostring(math.round(close,2)) +" , \"quantity\": " + str.tostring(math.abs(positionSize)) + ", \"type\": \"MKT\" , \"action\": \"Open Short\" }"
+closePositionMSGShort := "{ \"symbol\": \"TQQQ\",  \"side\": \"BUY\", \"price\": "+ str.tostring(math.round(close,2)) +" , \"quantity\": " + str.tostring(math.abs(positionSize)) + ", \"type\": \"MKT\" , \"action\": \"Close Position\" }"
+
+//}
+////////////////////////////////////////////////////////////////////////////////////////////////////////
+plot(limitLong,color = color.green,style = plot.style_cross,linewidth = 1)
+plot(stopLossLong, "slLong",color = stopLossLong != stopLossLong[1] ?  na: color.green,linewidth = 1,style = plot.style_steplinebr)
+plot(limitShort,color = color.red,style = plot.style_cross,linewidth = 1)
+plot(stopLossShort,"slShort",color = stopLossShort != stopLossShort[1] ? na : color.red,linewidth = 1,style = plot.style_steplinebr)
+plot(nearestKeyLevel,color = nearestKeyLevel != nearestKeyLevel[1] ? na : color.purple, style = plot.style_steplinebr)
+plot(nextKeyLevel,color = nextKeyLevel != nextKeyLevel[1] ? na : color.orange,style = plot.style_steplinebr)
+plotshape(entrySignalShort,color = color.green,location = location.belowbar)
+plotshape(entrySignalShort,color = color.red)
+plotshape(math.abs(stopLossShort - close) * 1.48 <= math.abs(close - nextKeyLevel) and close < nearestKeyLevel,color = color.red,style = shape.triangledown,location = location.abovebar)
+plotshape(math.abs(stopLossLong - close) * 1.48 <= math.abs(close - nextKeyLevel) and close > nearestKeyLevel,color = color.green,style = shape.triangleup,location = location.belowbar)
+
+    
+
